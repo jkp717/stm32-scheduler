@@ -8,19 +8,21 @@
 
 #include "scheduler.h"
 
-
-static Scheduler_t Scheduler = { 0 };
-
+static Scheduler_t Scheduler = {
+  .taskQ = NULL,
+  .taskCnt = 0,
+  .isActive = false
+};
 
 /**
   * @brief  Executes task function and removes from taskQ
   * @param  n Task index in taskQ
   * @retval None
   */
-static void _executeTask(uint16_t n) {
+static void _executeTask(Task_t *pTask) {
 
   // execute task function
-  Scheduler.taskQ[n].func(Scheduler.taskQ[n].params);
+  pTask->func(Scheduler.taskQ[n].params);
 
   // free task params space
   if(Scheduler.taskQ[n].params) {
@@ -39,103 +41,130 @@ static void _executeTask(uint16_t n) {
   Scheduler.taskCnt--;
 }
 
-
 /**
   * @brief  Insert task into a sorted queue based on startTick
   * @param  task Task function pointer
   * @param  params Task function parameters pointer
   * @param  size Size of function parameters
   * @param  runtime When task should run in ms
-  * @retval int16_t Returns position added or -1 if unable to add
+  * @retval None
   */
-int CORE_ScheduleTask(void (*task)(void *), void *params, size_t size, uint32_t runtime) {
+ void CORE_ScheduleTask(void (*task)(void *), void *params, size_t size, uint32_t runtime) {
 
-  int pos = -1;
   uint32_t executeTick = HAL_GetTick() + runtime;
 
-  // Get task array position for new task
-  if (Scheduler.taskCnt == 0) {
-    pos = 0;
+  // Only add events when dispatch is active
+  if (!Scheduler.isActive)
+    return;
+
+  // Prevent overflowing scheduler
+  assert(Scheduler.taskCnt < SCHEDULER_TASK_LIMIT);
+
+  if (Scheduler.taskQ != NULL) {
+    Task_t *t = Scheduler.taskQ;
+
+    // Find the end of the linked-list
+    while (t->next != NULL) {
+        t = t->next;
+    }
+
+    /* now we can add a new task */
+    t->next = (Task_t *) malloc(sizeof(Task_t));
+    assert(t->next != NULL);
+
+    t->next->func = task;
+    t->next->executeTick = executeTick;
+
+    if (params != NULL) {
+      t->next->params = malloc(size);
+      memcpy(t->next->params, params, size);
+
+    } else {
+      t->next->params = NULL;
+    }
+    t->next->next = NULL;
 
   } else {
-    for (int p = 0; p < Scheduler.taskCnt; p++) {
-      if (executeTick < Scheduler.taskQ[p].executeTick) {
-        pos = p;
-        break;
-      }
-    }
+    // taskQ head was NULL so create new linked-list head
+    Scheduler.taskQ = (Task_t *) malloc(sizeof(Task_t));
+    assert(Scheduler.taskQ != NULL);
 
-    // executeTick is > all others in taskQ so add it to the end
-    if (pos < 0) {
-      assert(Scheduler.taskCnt < SCHEDULER_TASK_LIMIT);
+    Scheduler.taskQ->func = task;
+    Scheduler.taskQ->executeTick = executeTick;
 
-      pos = (int)Scheduler.taskCnt;  // add to end
-    }
+    if (params != NULL) {
+      Scheduler.taskQ->params = malloc(size);
+      memcpy(Scheduler.taskQ->params, params, size);
 
-    for (uint16_t i = Scheduler.taskCnt; i > pos; i--) {
-      Scheduler.taskQ[i] = Scheduler.taskQ[i - 1];
+    } else {
+      Scheduler.taskQ->params = NULL;
     }
+    Scheduler.taskQ->next = NULL;
   }
-
-  void *pParams = NULL;
-
-  // create space for parameters if provided
-  if (params) {
-    pParams = (void *) malloc(size);
-    if (!pParams) {
-      debug_msg("[file:%s:lineno:%d] ***ERROR*** Unable to allocate space for task params",
-          __FILE__, __LINE__);
-      return -1;
-    }
-    memcpy(pParams, params, size);
-  }
-
-  Scheduler.taskQ[pos].func = task;
-  Scheduler.taskQ[pos].params = pParams;
-  Scheduler.taskQ[pos].executeTick = executeTick;
-
   Scheduler.taskCnt++;
-
-  return pos;
+  return;
 }
 
 
 /**
-  * @brief  Removes task from queue without executing it
-  * @param  task Task function pointer
-  * @retval int16_t Returns position removed or -1 if unable to find
+  * @brief  Removing the first task from queue
+  * @retval None
   */
-int CORE_RemoveScheduleTask(void (*task)(void *)) {
+ void CORE_ShiftTaskQ(void) {
 
-  if (Scheduler.taskCnt == 0)
-    return 0;
+  if (Scheduler.taskQ == NULL)
+      return;
 
-  uint16_t taskIdx = 0;
-  for (uint16_t i = 0; i < Scheduler.taskCnt; i++) {
-    if (task == Scheduler.taskQ[i].func) {
-      taskIdx = i;
-      break;
-    } else if (i == (Scheduler.taskCnt - 1)) {
-      // reaches the end without finding task
-      return -1;
-    }
-  }
-  // free task params space
-  if(Scheduler.taskQ[taskIdx].params) {
-    free(Scheduler.taskQ[taskIdx].params);
-  }
-  // remove task from queue
-  if (Scheduler.taskCnt > 1) {
-    for (uint16_t n = taskIdx; n < Scheduler.taskCnt; n++) {
-      Scheduler.taskQ[n] = Scheduler.taskQ[n + 1];
-    }
-  } else {
-    Scheduler.taskQ[0].executeTick = 0;
-    Scheduler.taskQ[0].func = NULL;
-  }
+  Task_t *nextTask = NULL;
+  if ((Scheduler.taskQ)->next != NULL)
+    nextTask = (Scheduler.taskQ)->next;
+
+  if((Scheduler.taskQ)->params != NULL)
+    free((Scheduler.taskQ)->params);
+
+  free(Scheduler.taskQ);
+  Scheduler.taskQ = nextTask;
+
   Scheduler.taskCnt--;
-  return taskIdx;
 }
+
+/**
+  * @brief  Removes task from queue without executing it
+  * @param  func Task function pointer
+  * @retval None
+  */
+ void CORE_RemoveScheduledTaskByRef(void (*func)(void *)) {
+  if (Scheduler.taskQ == NULL)
+    return;
+  
+  // first task so just use shift function
+  if (Scheduler.taskQ->func == func) {
+    CORE_ShiftTaskQ();
+    return;
+  }
+
+  // Get the previous task to the searched task to update it's 'next' pointer
+  Task_t *prevNode = Scheduler.taskQ;
+  while (prevNode->next != NULL) {
+    if ( prevNode->next->func == func )
+      break;
+
+    prevNode = prevNode->next;
+  }
+
+  // Unable to find node
+  if ( prevNode == NULL )
+    return;
+
+  // move next of searched event to next of previous event
+  prevNode->next = pEvent->next;
+  if ( pEvent->data != NULL ) {
+    free(pEvent->data);
+  }
+  free(pEvent);
+  eventCnt--;
+}
+
 
 int CORE_GetScheduleTaskCount(void) {
   return Scheduler.taskCnt;
