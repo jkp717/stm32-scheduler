@@ -13,13 +13,14 @@
 typedef void (*ScheduleFunc_t)(void*);
 
 typedef struct _task {
-  uint32_t   executeTick;    // When to start task (based on sysTick)
-  void      *params;
+  uint32_t          executeTick;    // When to start task (based on sysTick)
+  void             *params;
   void (*func)( void* );
+  struct _task     *next;        // Next in linked list
 } Task_t;
 
 typedef struct {
-  Task_t                 taskQ[SCHEDULER_TASK_LIMIT];
+  Task_t                *taskQ;
   uint16_t               taskCnt;
   bool                   isActive;          // Boolean if the RunScheduler has been called
 } Scheduler_t;
