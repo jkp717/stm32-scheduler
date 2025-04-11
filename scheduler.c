@@ -8,38 +8,13 @@
 
 #include "scheduler.h"
 
-static Scheduler_t Scheduler = {
+
+static Scheduler_t _scheduler = {
   .taskQ = NULL,
   .taskCnt = 0,
   .isActive = false
 };
 
-/**
-  * @brief  Executes task function and removes from taskQ
-  * @param  n Task index in taskQ
-  * @retval None
-  */
-static void _executeTask(Task_t *pTask) {
-
-  // execute task function
-  pTask->func(Scheduler.taskQ[n].params);
-
-  // free task params space
-  if(Scheduler.taskQ[n].params) {
-    free(Scheduler.taskQ[n].params);
-  }
-  // remove task from queue
-  if (Scheduler.taskCnt > 1) {
-    for (uint16_t i = n; i < Scheduler.taskCnt; i++) {
-      Scheduler.taskQ[i] = Scheduler.taskQ[i + 1];
-    }
-  } else {
-    Scheduler.taskQ[0].executeTick = 0;
-    Scheduler.taskQ[0].func = NULL;
-  }
-
-  Scheduler.taskCnt--;
-}
 
 /**
   * @brief  Insert task into a sorted queue based on startTick
@@ -49,19 +24,19 @@ static void _executeTask(Task_t *pTask) {
   * @param  runtime When task should run in ms
   * @retval None
   */
- void CORE_ScheduleTask(void (*task)(void *), void *params, size_t size, uint32_t runtime) {
+ void CORE_ScheduleTask(SchedulerTaskFunc_t func, void *params, size_t size, uint32_t runtime) {
 
   uint32_t executeTick = HAL_GetTick() + runtime;
 
   // Only add events when dispatch is active
-  if (!Scheduler.isActive)
+  if (!_scheduler.isActive)
     return;
 
   // Prevent overflowing scheduler
-  assert(Scheduler.taskCnt < SCHEDULER_TASK_LIMIT);
+  assert(_scheduler.taskCnt < SCHEDULER_TASK_LIMIT);
 
-  if (Scheduler.taskQ != NULL) {
-    Task_t *t = Scheduler.taskQ;
+  if (_scheduler.taskQ != NULL) {
+    Task_t *t = _scheduler.taskQ;
 
     // Find the end of the linked-list
     while (t->next != NULL) {
@@ -72,7 +47,7 @@ static void _executeTask(Task_t *pTask) {
     t->next = (Task_t *) malloc(sizeof(Task_t));
     assert(t->next != NULL);
 
-    t->next->func = task;
+    t->next->func = func;
     t->next->executeTick = executeTick;
 
     if (params != NULL) {
@@ -86,22 +61,22 @@ static void _executeTask(Task_t *pTask) {
 
   } else {
     // taskQ head was NULL so create new linked-list head
-    Scheduler.taskQ = (Task_t *) malloc(sizeof(Task_t));
-    assert(Scheduler.taskQ != NULL);
+    _scheduler.taskQ = (Task_t *) malloc(sizeof(Task_t));
+    assert(_scheduler.taskQ != NULL);
 
-    Scheduler.taskQ->func = task;
-    Scheduler.taskQ->executeTick = executeTick;
+    _scheduler.taskQ->func = func;
+    _scheduler.taskQ->executeTick = executeTick;
 
     if (params != NULL) {
-      Scheduler.taskQ->params = malloc(size);
-      memcpy(Scheduler.taskQ->params, params, size);
+      _scheduler.taskQ->params = malloc(size);
+      memcpy(_scheduler.taskQ->params, params, size);
 
     } else {
-      Scheduler.taskQ->params = NULL;
+      _scheduler.taskQ->params = NULL;
     }
-    Scheduler.taskQ->next = NULL;
+    _scheduler.taskQ->next = NULL;
   }
-  Scheduler.taskCnt++;
+  _scheduler.taskCnt++;
   return;
 }
 
@@ -112,39 +87,39 @@ static void _executeTask(Task_t *pTask) {
   */
  void CORE_ShiftTaskQ(void) {
 
-  if (Scheduler.taskQ == NULL)
+  if (_scheduler.taskQ == NULL)
       return;
 
   Task_t *nextTask = NULL;
-  if ((Scheduler.taskQ)->next != NULL)
-    nextTask = (Scheduler.taskQ)->next;
+  if ((_scheduler.taskQ)->next != NULL)
+    nextTask = (_scheduler.taskQ)->next;
 
-  if((Scheduler.taskQ)->params != NULL)
-    free((Scheduler.taskQ)->params);
+  if((_scheduler.taskQ)->params != NULL)
+    free((_scheduler.taskQ)->params);
 
-  free(Scheduler.taskQ);
-  Scheduler.taskQ = nextTask;
+  free(_scheduler.taskQ);
+  _scheduler.taskQ = nextTask;
 
-  Scheduler.taskCnt--;
+  _scheduler.taskCnt--;
 }
 
 /**
   * @brief  Removes task from queue without executing it
   * @param  func Task function pointer
-  * @retval None
+  * @retval Pointer to previous node in linked list or NULL if unable to find
   */
- void CORE_RemoveScheduledTaskByRef(void (*func)(void *)) {
-  if (Scheduler.taskQ == NULL)
-    return;
-  
+Task_t* CORE_RemoveScheduleTaskByRef(void (*func)(void *)) {
+  if (_scheduler.taskQ == NULL)
+    return NULL;
+
   // first task so just use shift function
-  if (Scheduler.taskQ->func == func) {
+  if (_scheduler.taskQ->func == func) {
     CORE_ShiftTaskQ();
-    return;
+    return NULL;
   }
 
   // Get the previous task to the searched task to update it's 'next' pointer
-  Task_t *prevNode = Scheduler.taskQ;
+  Task_t *prevNode = _scheduler.taskQ;
   while (prevNode->next != NULL) {
     if ( prevNode->next->func == func )
       break;
@@ -154,38 +129,54 @@ static void _executeTask(Task_t *pTask) {
 
   // Unable to find node
   if ( prevNode == NULL )
-    return;
+    return NULL;
 
-  // move next of searched event to next of previous event
-  prevNode->next = pEvent->next;
-  if ( pEvent->data != NULL ) {
-    free(pEvent->data);
+  // prevNode->next == searched node
+  // now we have previous and next nodes, so we can delete the searched node
+  Task_t *nextNode = prevNode->next->next;
+
+  // free searched node params
+  if ( prevNode->next->params != NULL ) {
+    free(prevNode->next->params);
   }
-  free(pEvent);
-  eventCnt--;
+
+  // free searched node
+  free(prevNode->next);
+
+  prevNode->next = nextNode;
+  _scheduler.taskCnt--;
+
+  return prevNode;
 }
 
 
+
 int CORE_GetScheduleTaskCount(void) {
-  return Scheduler.taskCnt;
+  return _scheduler.taskCnt;
 }
 
 void CORE_RunScheduler(void) {
 
-  if (! Scheduler.isActive )
-    Scheduler.isActive = true;
+  if (! _scheduler.isActive )
+    _scheduler.isActive = true;
 
-  if ( Scheduler.taskCnt == 0 )
+  if ( _scheduler.taskCnt == 0 )
     return;
 
   uint32_t now = HAL_GetTick();
-  for (uint16_t i = 0; i < Scheduler.taskCnt; i ++) {
-    if (Scheduler.taskQ[i].executeTick <= now) {
-      _executeTask(i);
-      break;  // _executeTask updates taskQ so continuing to process tasks could lead to weird results.
+
+  Task_t *pTask = _scheduler.taskQ;
+  while (pTask != NULL) {
+
+    if (pTask->executeTick <= now) {
+
+      pTask->func(pTask->params);
+
+      // Returns previous node to the one searched to continue loop
+      pTask = CORE_RemoveScheduleTaskByRef(pTask->func);
+
     } else {
-      break;  // tasks are ordered by executeTick so no need to check every task
+      pTask = pTask->next;
     }
   }
 }
-
